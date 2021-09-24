@@ -28,7 +28,7 @@ class HTTPServer{
 	System.out.println("server www root: " + WWW_ROOT);
 
 	while (true) {
-
+		
 	    try {
 
 		    // take a ready connection from the accepted queue
