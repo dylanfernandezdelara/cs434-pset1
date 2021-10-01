@@ -91,36 +91,4 @@ class HTTPServer{
 	
 } // end of main
 
-public static void parseConfigFile(String configFile, HashMap<String, String> map) throws FileNotFoundException{
-	try (Scanner parser = new Scanner(new FileInputStream(configFile))){
-		String tempRoot = "";
-		String tempServerName = "";
-		
-		String iterator = parser.next();
-
-		while (parser.hasNext()) {
-			if (iterator.equals("Listen")){
-				iterator = parser.next();
-				map.put("Port", iterator);
-			}
-			else if (iterator.equals("CacheSize")){
-				iterator = parser.next();
-				map.put("CacheSize", iterator);
-			}
-			else if (iterator.equals("DocumentRoot")){
-				iterator = parser.next();
-				tempRoot = iterator;
-			}
-			else if (iterator.equals("ServerName")){
-				iterator = parser.next();
-				tempServerName = iterator;
-				map.put(tempServerName, tempRoot);
-			}
-			iterator = parser.next();
-		}
-	}
-	catch (FileNotFoundException exception){
-	}
-}
-
 } // end of class WebServer
