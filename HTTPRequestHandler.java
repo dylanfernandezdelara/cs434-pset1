@@ -7,7 +7,9 @@ import java.net.Authenticator.RequestorType;
 import java.nio.file.Files;
 import java.text.SimpleDateFormat;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.*;
+import java.time.Instant;
 
 class HTTPRequestHandler {
 
@@ -15,13 +17,15 @@ class HTTPRequestHandler {
     static int     reqCount = 0;
 
 	static boolean isModifiedSinceFlag = false;
-	String isModifiedSinceDate;
+	static boolean isMobileUser = false;
+	String isModifiedSinceString = "";
+	Date isModifiedSinceDate;
 
-	long lastModifiedDate;
+	Date lastModifiedDate;
 
     String WWW_ROOT;
     Socket connSocket;
-	HashMap<String, String> serverCache;
+	HashMap<String, byte[]> serverCache;
 	int maxServerCacheSize;
 	HashMap<String, String> configMap;
 
@@ -36,7 +40,7 @@ class HTTPRequestHandler {
 	Integer statusCode = 200;
 
     public HTTPRequestHandler(Socket connectionSocket, 
-			     String WWW_ROOT, HashMap<String, String> serverCache, int maxServerCacheSize, HashMap<String, String> configMap) throws Exception
+			     String WWW_ROOT, HashMap<String, byte[]> serverCache, int maxServerCacheSize, HashMap<String, String> configMap) throws Exception
     {
         reqCount ++;
 
@@ -63,7 +67,9 @@ class HTTPRequestHandler {
 	    if ( fileInfo != null ) // found the file and knows its info
 	    {
 		    outputResponseHeader();
-		    outputResponseBody();
+			if (isModifiedSinceFlag && isModifiedSinceDate.before(lastModifiedDate)){
+		    	outputResponseBody();
+			}
 	    } // do not handle error
 
 	    connSocket.close();
@@ -81,9 +87,8 @@ class HTTPRequestHandler {
 	    String requestMessageLine = inFromClient.readLine();
 	    DEBUG("Request " + reqCount + ": " + requestMessageLine);
 
-	    // process the request
+	    // GET request
 	    String[] request = requestMessageLine.split("\\s");
-		
 	    if (request.length < 2 || !request[0].equals("GET") || !request[2].equals("HTTP/1.1"))
 	    {
 		    outputError(500, "Bad request");
@@ -92,59 +97,62 @@ class HTTPRequestHandler {
 
 	    // parse URL to retrieve file name
 	    urlName = request[1];
-	    
 	    if ( urlName.startsWith("/") == true )
-	       urlName  = urlName.substring(1);
+	    	urlName  = urlName.substring(1);
 
-        // debugging
-        if (_DEBUG) {
-        	String line = inFromClient.readLine();
-			request = line.split("\\s");
+		requestMessageLine = inFromClient.readLine();
+		request = requestMessageLine.split("\\s");
+	
+		// Host Request
+		if (request.length != 2 && !request[0].equals("HOST:")){
+			outputError(500, "Bad request");
+			return;
+		}
+		hostName = request[1];
+		if (configMap.get(hostName) == null){
+			outputError(404, "Host Not Found");
+			return;
+		}
+		WWW_ROOT = configMap.get(hostName);	
 
-        	while ( !line.equals("") ) {
-            	DEBUG( "Header: " + line );
-				
-				// Host Request
-				if (request.length != 2 && !request[0].equals("HOST:")){
-					outputError(500, "Bad request");
-		    		return;
+		// Process OTHER Header Requests
+        while ( !requestMessageLine.equals("") ) {
+			requestMessageLine = inFromClient.readLine();
+			request = requestMessageLine.split("\\s");
+			
+			// User-Agent Request
+            if (request[0].equals("User-Agent:")){
+				if (!request[1].equals("Mozilla/5.0")){
+					outputError(500, "Invalid User Agent");
+					return;
 				}
-				hostName = request[1];
-				if (!configMap.get(hostName)){
-					outputError(404, "Host Not Found");
-		    		return;
+				if (request[2].equals("(iPhone;")){
+					isMobileUser = true;
 				}
-				WWW_ROOT = configMap.get(hostName);
+			}
 
-				// User-Agent Request
-            	line = inFromClient.readLine();
-				request = line.split("\\s");
+			// If-Modified-Since Request - ex. Wed, 21 Oct 2015 07:28:00 GMT
+			else if (request[0].equals("If-Modified-Since:")){
+				isModifiedSinceFlag = true;
 
-				// If-Modified-Since Request
-				line = inFromClient.readLine();
-				request = line.split("\\s");
-
-				if (request[0].equals("If-Modified-Since:")){
-					isModifiedSinceFlag = true;
-
-					for (int i = 1; i < request.length; i++){
-						isModifiedSinceDate.concat(request[i]);
-						if (i != request.length - 1){
-							isModifiedSinceDate.concat(" ");
-						}
+				for (int i = 1; i < request.length; i++){
+					isModifiedSinceString = isModifiedSinceString.concat(request[i]);
+					if (i != request.length - 1){
+						isModifiedSinceString = isModifiedSinceString.concat(" ");
 					}
-
 				}
 
-           }
+				isModifiedSinceDate = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz").parse(isModifiedSinceString);
+			}
 
+			// If future implementation requires more headers, insert them here
         }
 
 	    // map to file name
 	    fileName = WWW_ROOT + urlName;
 	    DEBUG("Map to File name: " + fileName);
 
-	    fileInfo = new File( fileName );
+	    fileInfo = new File(fileName);
 	    if ( !fileInfo.isFile() ) 
 	    {
 		    outputError(404,  "Not Found");
@@ -152,7 +160,7 @@ class HTTPRequestHandler {
 	    }
 		// fileName exists as a file
 		else {
-			lastModifiedDate = fileInfo.lastModified();
+			lastModifiedDate = new Date(fileInfo.lastModified());
 		}
 
     } // end mapURL2file
@@ -160,18 +168,30 @@ class HTTPRequestHandler {
 
     private void outputResponseHeader() throws Exception 
     {
+		if (!isModifiedSinceDate.before(lastModifiedDate)){
+			statusCode = 304;
+		}
+
 		String statusMsg = returnStatusMessage(statusCode);
 
 		// HTTP/1.1 Header
-	    outToClient.writeBytes("HTTP/1.0 " + statusCode.toString() + statusMsg);
+	    outToClient.writeBytes("HTTP/1.0 " + statusCode.toString() + statusMsg + "\r\n");
 		
 		// Date Header
-		outToClient.writeBytes(LocalDateTime.now());
+		Date current = new Date();
+		Instant now = current.toInstant();
+		Date dateNow = Date.from(now);
+		SimpleDateFormat sdf = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz");
+		sdf.setTimeZone(TimeZone.getTimeZone("GMT"));
+		outToClient.writeBytes("Date: " + sdf.format(dateNow) + "\r\n");
+
+		//outToClient.writeBytes("temp: " + sdf.format(isModifiedSinceDate) + "\r\n");
 
 		// Server Header
-		outToClient.writeBytes(hostName);
+		outToClient.writeBytes("Server: " + hostName + "\r\n");
 
 		// Last-Modified Header
+		outToClient.writeBytes("Last-Modified: " + sdf.format(lastModifiedDate) + "\r\n");
 
 		// Content-Type Header
 		if (urlName.endsWith(".jpg"))
@@ -184,18 +204,13 @@ class HTTPRequestHandler {
 	        outToClient.writeBytes("Content-Type: text/plain\r\n");
 
 		// Content Length Header
-
-		// part1 doesn't have anything with cookies as of right now
-	    outToClient.writeBytes("Set-Cookie: temporaryCookie\r\n");
-
+		outToClient.writeBytes("Content-Length: " + String.valueOf((int)fileInfo.length()) + "\r\n");
+		outToClient.writeBytes("\r\n");
     }
 
     private void outputResponseBody() throws Exception 
-    {
-	    int numOfBytes = (int) fileInfo.length();
-	    outToClient.writeBytes("Content-Length: " + numOfBytes + "\r\n");
-	    outToClient.writeBytes("\r\n");
-	
+    {	
+		int numOfBytes = (int) fileInfo.length();
 	    // send file content
 	    FileInputStream fileStream = new FileInputStream (fileName);
 		byte[] fileInBytes = new byte[numOfBytes];
@@ -211,6 +226,7 @@ class HTTPRequestHandler {
 		}
 
 	    outToClient.write(fileInBytes, 0, numOfBytes);
+		fileStream.close();
     }
 
     void outputError(int errCode, String errMsg)
@@ -230,7 +246,10 @@ class HTTPRequestHandler {
 		// will add more codes in next iteration
 		String msg = "Invalid code";
 		if (code == 200){
-			msg = " OK\r\n";
+			msg = " OK";
+		}
+		else if (code == 304){
+			msg = " Not Modified";
 		}
 		return msg;
 	}

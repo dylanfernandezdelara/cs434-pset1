@@ -65,7 +65,7 @@ class HTTPServer{
 	System.out.println("server www root: " + WWW_ROOT);
 
 	// create server cache - stores static files
-	HashMap<String, String> serverCache = new HashMap<String, String>();
+	HashMap<String, byte[]> serverCache = new HashMap<String, byte[]>();
 
 	// set max cache size
 	int maxServerCacheSize = Integer.valueOf(configArgs.get("CacheSize"));
@@ -86,6 +86,7 @@ class HTTPServer{
 
 	    } catch (Exception e)
 		{
+			listenSocket.close();
 		}
 	} // end of while (true)
 	
