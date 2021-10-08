@@ -9,6 +9,9 @@ import java.text.SimpleDateFormat;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.*;
+
+import javax.print.DocFlavor.STRING;
+
 import java.time.Instant;
 
 class HTTPRequestHandler {
@@ -20,8 +23,14 @@ class HTTPRequestHandler {
 	static boolean isMobileUser = false;
 	String isModifiedSinceString = "";
 	Date isModifiedSinceDate;
-
 	Date lastModifiedDate;
+
+	static boolean fileIsExecutable = false;
+	String executableName = "./";
+
+	String queryString = "";
+	HashMap<String, String> envMap = new HashMap<String, String>();
+	String requestMethod;
 
     String WWW_ROOT;
     Socket connSocket;
@@ -95,10 +104,18 @@ class HTTPRequestHandler {
 		    return;
 	    }
 
+		requestMethod = request[0];
+
 	    // parse URL to retrieve file name
 	    urlName = request[1];
 	    if ( urlName.startsWith("/") == true )
 	    	urlName  = urlName.substring(1);
+
+		// indicates that there is a query string
+		if (urlName.indexOf("?") != -1){
+			queryString = urlName.substring(urlName.lastIndexOf("?") + 1);
+			// envMap = QUERY_STRING_toMAP(queryString);
+		}
 
 		requestMessageLine = inFromClient.readLine();
 		request = requestMessageLine.split("\\s");
@@ -163,6 +180,13 @@ class HTTPRequestHandler {
 			lastModifiedDate = new Date(fileInfo.lastModified());
 		}
 
+		// file is an executable
+		if (fileInfo.canExecute()){
+			fileIsExecutable = true;
+			executableName = executableName.concat(fileName.substring(fileName.lastIndexOf("/") + 1));
+			DEBUG(executableName);
+		}
+
     } // end mapURL2file
 
 
@@ -185,8 +209,6 @@ class HTTPRequestHandler {
 		sdf.setTimeZone(TimeZone.getTimeZone("GMT"));
 		outToClient.writeBytes("Date: " + sdf.format(dateNow) + "\r\n");
 
-		//outToClient.writeBytes("temp: " + sdf.format(isModifiedSinceDate) + "\r\n");
-
 		// Server Header
 		outToClient.writeBytes("Server: " + hostName + "\r\n");
 
@@ -200,33 +222,65 @@ class HTTPRequestHandler {
 	        outToClient.writeBytes("Content-Type: image/gif\r\n");
 	    else if (urlName.endsWith(".html") || urlName.endsWith(".htm"))
 	        outToClient.writeBytes("Content-Type: text/html\r\n");
+		else if (fileIsExecutable){
+			outToClient.writeBytes("Content-Type: application/octet-stream\r\n");
+		}
 	    else
 	        outToClient.writeBytes("Content-Type: text/plain\r\n");
 
 		// Content Length Header
-		outToClient.writeBytes("Content-Length: " + String.valueOf((int)fileInfo.length()) + "\r\n");
+		if (!fileIsExecutable){ // use Transfer-Encoding header for executables
+			outToClient.writeBytes("Content-Length: " + String.valueOf((int)fileInfo.length()) + "\r\n");
+		}
 		outToClient.writeBytes("\r\n");
     }
 
     private void outputResponseBody() throws Exception 
     {	
-		int numOfBytes = (int) fileInfo.length();
-	    // send file content
-	    FileInputStream fileStream = new FileInputStream (fileName);
-		byte[] fileInBytes = new byte[numOfBytes];
+		if (!fileIsExecutable){
+			int numOfBytes = (int) fileInfo.length();
+			// send file content
+			FileInputStream fileStream = new FileInputStream (fileName);
+			byte[] fileInBytes = new byte[numOfBytes];
 
-		if (!serverCache.containsKey(fileName)){
-			fileStream.read(fileInBytes);
-			if ((serverCache.size() + numOfBytes) < maxServerCacheSize) {
-				serverCache.put(fileName, fileInBytes);
+			if (!serverCache.containsKey(fileName)){
+				fileStream.read(fileInBytes);
+				if ((serverCache.size() + numOfBytes) < maxServerCacheSize) {
+					serverCache.put(fileName, fileInBytes);
+				}
 			}
-		}
-		else {
-			fileInBytes = serverCache.get(fileName);
-		}
+			else {
+				fileInBytes = serverCache.get(fileName);
+			}
 
-	    outToClient.write(fileInBytes, 0, numOfBytes);
-		fileStream.close();
+			outToClient.write(fileInBytes, 0, numOfBytes);
+			fileStream.close();
+		} 
+		else {
+			// executable so create new process and output in body
+			ProcessBuilder pb = new ProcessBuilder(executableName);
+			Map<String, String> env = pb.environment();
+			env.put("QUERY_STRING", queryString);
+			env.put("REMOTE_ADDR", "127.0.0.1");
+			env.put("REMOTE_HOST", "127.0.0.1"); // host name of client, but substituted with REMOTE_ADDR for now according to docs
+			env.put("REMOTE_IDENT", ""); // empty string
+			env.put("REMOTE_USER", ""); // empty string
+			env.put("REQUEST_METHOD", requestMethod);
+			env.put("SERVER_NAME", configMap.get(hostName));
+			env.put("SERVER_PORT", configMap.get("Port"));
+			env.put("SERVER_PROTOCOL", "HTTP/1.1");
+			env.put("SERVER_SOFTWARE", "Java/" + System.getProperty("java.version"));
+			Process p = pb.start();
+			BufferedReader exeResponse = new BufferedReader(new InputStreamReader(p.getInputStream()));
+			String exeResponseLine = exeResponse.readLine();
+			
+			while (exeResponseLine != null){
+				outToClient.writeBytes(exeResponseLine);
+				exeResponseLine = exeResponse.readLine();
+			}
+
+			outToClient.writeBytes("\r\n");
+		}
     }
 
     void outputError(int errCode, String errMsg)
@@ -252,5 +306,22 @@ class HTTPRequestHandler {
 			msg = " Not Modified";
 		}
 		return msg;
+	}
+
+	public HashMap<String, String> QUERY_STRING_toMAP(String query) {
+		HashMap<String, String> map = new HashMap<String, String>();
+		if (query == null){
+			return null;
+		}
+		for (String param : query.split("&")) {
+			String[] entry = param.split("=");
+			if (entry.length > 1) {
+				map.put(entry[0], entry[1]);
+			}
+			else {
+				map.put(entry[0], "");
+			}
+		}
+		return map;
 	}
 }
