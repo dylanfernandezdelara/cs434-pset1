@@ -6,7 +6,7 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 
-class HTTPServer{
+class SeqHTTPServer{
 
     public static int serverPort = 6789;    
     public static String WWW_ROOT = "/home/httpd/html/zoo/classes/cs434/";

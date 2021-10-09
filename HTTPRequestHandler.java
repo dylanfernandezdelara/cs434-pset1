@@ -12,6 +12,8 @@ import java.util.*;
 
 import javax.print.DocFlavor.STRING;
 
+import jdk.nashorn.internal.runtime.Debug;
+
 import java.time.Instant;
 
 class HTTPRequestHandler {
@@ -46,6 +48,13 @@ class HTTPRequestHandler {
     String fileName;
     File fileInfo;
 
+	String tempPostInputFileName = "tempPostFile";
+	File tempPostInputFileInfo;
+
+	int postMsgLength;
+	String POSTbodyInput;
+	String POSTcontentType;
+
 	Integer statusCode = 200;
 
     public HTTPRequestHandler(Socket connectionSocket, 
@@ -76,7 +85,7 @@ class HTTPRequestHandler {
 	    if ( fileInfo != null ) // found the file and knows its info
 	    {
 		    outputResponseHeader();
-			if (isModifiedSinceFlag && isModifiedSinceDate.before(lastModifiedDate)){
+			if (isModifiedSinceFlag && isModifiedSinceDate.before(lastModifiedDate) || fileIsExecutable){
 		    	outputResponseBody();
 			}
 	    } // do not handle error
@@ -96,9 +105,9 @@ class HTTPRequestHandler {
 	    String requestMessageLine = inFromClient.readLine();
 	    DEBUG("Request " + reqCount + ": " + requestMessageLine);
 
-	    // GET request
+	    // GET OR POST request
 	    String[] request = requestMessageLine.split("\\s");
-	    if (request.length < 2 || !request[0].equals("GET") || !request[2].equals("HTTP/1.1"))
+	    if (request.length < 2 || !(request[0].equals("GET") || request[0].equals("POST")) || !request[2].equals("HTTP/1.1"))
 	    {
 		    outputError(500, "Bad request");
 		    return;
@@ -114,7 +123,12 @@ class HTTPRequestHandler {
 		// indicates that there is a query string
 		if (urlName.indexOf("?") != -1){
 			queryString = urlName.substring(urlName.lastIndexOf("?") + 1);
-			// envMap = QUERY_STRING_toMAP(queryString);
+			urlName = urlName.substring(0, urlName.lastIndexOf("?"));
+		}
+
+		// Content Selection is request ends in /
+		if (urlName.endsWith("/") && !urlName.startsWith(".")){
+			urlName = "index.html";
 		}
 
 		requestMessageLine = inFromClient.readLine();
@@ -132,70 +146,116 @@ class HTTPRequestHandler {
 		}
 		WWW_ROOT = configMap.get(hostName);	
 
-		// Process OTHER Header Requests
-        while ( !requestMessageLine.equals("") ) {
-			requestMessageLine = inFromClient.readLine();
-			request = requestMessageLine.split("\\s");
-			
-			// User-Agent Request
-            if (request[0].equals("User-Agent:")){
-				if (!request[1].equals("Mozilla/5.0")){
-					outputError(500, "Invalid User Agent");
-					return;
+		if (requestMethod.equals("POST")){
+			while ( !requestMessageLine.equals("") ) {
+				requestMessageLine = inFromClient.readLine();
+				request = requestMessageLine.split("\\s");
+
+				// Content-Type Header
+				if (request[0].equals("Content-Type:")){
+					// varying content types
+					if (!(request[1].equals("application/json") || request[1].equals("application/x-www-form-urlencoded"))){
+						outputError(500, "Bad request");
+					}
+					POSTcontentType = request[1];
 				}
-				if (request[2].equals("(iPhone;")){
-					isMobileUser = true;
+				// Content Length Header
+				else if (request[0].equals("Content-Length:")){
+					if (request.length == 2){
+						postMsgLength = Integer.valueOf(request[1]);
+					}
 				}
 			}
-
-			// If-Modified-Since Request - ex. Wed, 21 Oct 2015 07:28:00 GMT
-			else if (request[0].equals("If-Modified-Since:")){
-				isModifiedSinceFlag = true;
-
-				for (int i = 1; i < request.length; i++){
-					isModifiedSinceString = isModifiedSinceString.concat(request[i]);
-					if (i != request.length - 1){
-						isModifiedSinceString = isModifiedSinceString.concat(" ");
+			requestMessageLine = inFromClient.readLine();
+			// BODY of POST
+			if (requestMessageLine.length() > postMsgLength){
+				outputError(500, "Bad request");
+			}
+			POSTbodyInput = requestMessageLine;
+			tempPostInputFileInfo = new File(tempPostInputFileName);
+			BufferedWriter writer = new BufferedWriter(new FileWriter(tempPostInputFileInfo));
+			writer.write(POSTbodyInput);
+			writer.close();
+			outToClient.writeBytes("\r\n");
+		}
+		else if (requestMethod.equals("GET")){
+			// Process OTHER GET Header Requests
+			while ( !requestMessageLine.equals("") ) {
+				requestMessageLine = inFromClient.readLine();
+				request = requestMessageLine.split("\\s");
+				
+				// User-Agent Request
+				if (request[0].equals("User-Agent:")){
+					if (!request[1].equals("Mozilla/5.0")){
+						outputError(500, "Invalid User Agent");
+						return;
+					}
+					if (request[2].equals("(iPhone;")){
+						DEBUG("iphone god i love this");
+						isMobileUser = true;
 					}
 				}
 
-				isModifiedSinceDate = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz").parse(isModifiedSinceString);
+				// If-Modified-Since Request
+				else if (request[0].equals("If-Modified-Since:")){
+					isModifiedSinceFlag = true;
+
+					for (int i = 1; i < request.length; i++){
+						isModifiedSinceString = isModifiedSinceString.concat(request[i]);
+						if (i != request.length - 1){
+							isModifiedSinceString = isModifiedSinceString.concat(" ");
+						}
+					}
+
+					isModifiedSinceDate = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz").parse(isModifiedSinceString);
+				}
+
+				// If future implementation requires more headers, insert them here
 			}
-
-			// If future implementation requires more headers, insert them here
-        }
-
+		}
 	    // map to file name
 	    fileName = WWW_ROOT + urlName;
-	    DEBUG("Map to File name: " + fileName);
 
 	    fileInfo = new File(fileName);
+		fileName = fileInfo.getCanonicalPath();
+		DEBUG(fileName);
+		File canonFileInfo = new File(WWW_ROOT);
+		String canonicalRoot = canonFileInfo.getCanonicalPath();
+		if (isMobileUser && fileName.equals(canonicalRoot)){
+			File mobileFile = new File (canonicalRoot + "/index_m.html");
+			if (!mobileFile.isFile()){
+				mobileFile = new File (canonicalRoot + "/index.html");
+			}
+			fileInfo = mobileFile;
+		}
+
 	    if ( !fileInfo.isFile() ) 
 	    {
 		    outputError(404,  "Not Found");
-		    fileInfo = null;
+			fileInfo = null;
+			return;
 	    }
 		// fileName exists as a file
-		else {
+		else if (!fileName.equals(canonicalRoot)) {
 			lastModifiedDate = new Date(fileInfo.lastModified());
 		}
-
+		
 		// file is an executable
 		if (fileInfo.canExecute()){
 			fileIsExecutable = true;
-			executableName = executableName.concat(fileName.substring(fileName.lastIndexOf("/") + 1));
-			DEBUG(executableName);
+			executableName = fileInfo.getAbsolutePath();
 		}
-
+		
     } // end mapURL2file
 
 
     private void outputResponseHeader() throws Exception 
     {
-		if (!isModifiedSinceDate.before(lastModifiedDate)){
+		
+		if (!fileIsExecutable && !isModifiedSinceDate.before(lastModifiedDate)){
 			statusCode = 304;
 		}
-
+		
 		String statusMsg = returnStatusMessage(statusCode);
 
 		// HTTP/1.1 Header
@@ -213,8 +273,10 @@ class HTTPRequestHandler {
 		outToClient.writeBytes("Server: " + hostName + "\r\n");
 
 		// Last-Modified Header
-		outToClient.writeBytes("Last-Modified: " + sdf.format(lastModifiedDate) + "\r\n");
-
+		if (!fileIsExecutable){
+			outToClient.writeBytes("Last-Modified: " + sdf.format(lastModifiedDate) + "\r\n");
+		}
+		
 		// Content-Type Header
 		if (urlName.endsWith(".jpg"))
 	        outToClient.writeBytes("Content-Type: image/jpeg\r\n");
@@ -222,17 +284,15 @@ class HTTPRequestHandler {
 	        outToClient.writeBytes("Content-Type: image/gif\r\n");
 	    else if (urlName.endsWith(".html") || urlName.endsWith(".htm"))
 	        outToClient.writeBytes("Content-Type: text/html\r\n");
-		else if (fileIsExecutable){
-			outToClient.writeBytes("Content-Type: application/octet-stream\r\n");
-		}
-	    else
+	    else if (!fileIsExecutable){
 	        outToClient.writeBytes("Content-Type: text/plain\r\n");
+		}
 
 		// Content Length Header
 		if (!fileIsExecutable){ // use Transfer-Encoding header for executables
 			outToClient.writeBytes("Content-Length: " + String.valueOf((int)fileInfo.length()) + "\r\n");
+			outToClient.writeBytes("\r\n");
 		}
-		outToClient.writeBytes("\r\n");
     }
 
     private void outputResponseBody() throws Exception 
@@ -257,29 +317,41 @@ class HTTPRequestHandler {
 			fileStream.close();
 		} 
 		else {
-			// executable so create new process and output in body
+
 			ProcessBuilder pb = new ProcessBuilder(executableName);
 			Map<String, String> env = pb.environment();
+			pb.redirectInput(tempPostInputFileInfo);
 			env.put("QUERY_STRING", queryString);
 			env.put("REMOTE_ADDR", "127.0.0.1");
 			env.put("REMOTE_HOST", "127.0.0.1"); // host name of client, but substituted with REMOTE_ADDR for now according to docs
-			env.put("REMOTE_IDENT", ""); // empty string
-			env.put("REMOTE_USER", ""); // empty string
+			env.put("REMOTE_IDENT", "");
+			env.put("REMOTE_USER", "");
 			env.put("REQUEST_METHOD", requestMethod);
 			env.put("SERVER_NAME", configMap.get(hostName));
 			env.put("SERVER_PORT", configMap.get("Port"));
 			env.put("SERVER_PROTOCOL", "HTTP/1.1");
 			env.put("SERVER_SOFTWARE", "Java/" + System.getProperty("java.version"));
 			Process p = pb.start();
-			BufferedReader exeResponse = new BufferedReader(new InputStreamReader(p.getInputStream()));
-			String exeResponseLine = exeResponse.readLine();
+			BufferedInputStream exeResponse = new BufferedInputStream(p.getInputStream());
 			
-			while (exeResponseLine != null){
-				outToClient.writeBytes(exeResponseLine);
-				exeResponseLine = exeResponse.readLine();
+			// Printing out Content-Type Header from CGI Script
+			char charOfContentType = (char)exeResponse.read();
+			while (charOfContentType != '\n'){
+				outToClient.writeChar(charOfContentType);
+				charOfContentType = (char)exeResponse.read();
+			}
+			outToClient.writeBytes("\r\n\r\n");
+
+			// Content of CGI Output
+			byte[] chunkedBuf = new byte[1024];
+			int bytesChunked = 0;
+			while ((bytesChunked = exeResponse.read(chunkedBuf, 0, 1024)) != -1){
+				outToClient.writeBytes(String.valueOf(bytesChunked) + "\\r\\n");
+				outToClient.writeBytes("\r\n");
+				outToClient.write(chunkedBuf, 0, bytesChunked);
+				outToClient.writeBytes("\r\n");
 			}
 
-			outToClient.writeBytes("\r\n");
 		}
     }
 
@@ -306,22 +378,5 @@ class HTTPRequestHandler {
 			msg = " Not Modified";
 		}
 		return msg;
-	}
-
-	public HashMap<String, String> QUERY_STRING_toMAP(String query) {
-		HashMap<String, String> map = new HashMap<String, String>();
-		if (query == null){
-			return null;
-		}
-		for (String param : query.split("&")) {
-			String[] entry = param.split("=");
-			if (entry.length > 1) {
-				map.put(entry[0], entry[1]);
-			}
-			else {
-				map.put(entry[0], "");
-			}
-		}
-		return map;
 	}
 }
